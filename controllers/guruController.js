@@ -1,5 +1,6 @@
 // controllers/guruController.js
 const pool = require('../config/db');
+const { getAttendanceSchedule } = require('../utils/attendanceSchedule');
 
 // ENDPOINT: Mengambil rekap absen bulan ini + Nama Guru
 const getDashboard = async(req, res) => {
@@ -53,9 +54,11 @@ const getSchoolConfig = async(req, res) => {
             return res.status(404).json({ success: false, message: 'Konfigurasi sekolah belum diatur admin.' });
         }
 
+        const schedule = await getAttendanceSchedule(pool);
+
         res.json({
             success: true,
-            data: configQuery.rows[0]
+            data: { ...configQuery.rows[0], ...schedule }
         });
     } catch (error) {
         console.error('Error get config:', error);

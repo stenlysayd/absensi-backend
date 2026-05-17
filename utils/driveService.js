@@ -16,6 +16,14 @@ oauth2Client.setCredentials({
 
 const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
+const assertDriveConfigured = () => {
+  if (!process.env.DRIVE_CLIENT_ID ||
+      !process.env.DRIVE_CLIENT_SECRET ||
+      !process.env.DRIVE_REFRESH_TOKEN) {
+    throw new Error('Konfigurasi Google Drive belum lengkap di environment server.');
+  }
+};
+
 // Fungsi Helper untuk mencari atau membuat folder
 const getOrCreateFolder = async (folderName, parentFolderId) => {
   try {
@@ -49,7 +57,11 @@ const getOrCreateFolder = async (folderName, parentFolderId) => {
 // Fungsi Utama Upload Foto
 const uploadPhotoToDrive = async (fileBuffer, mimeType, fileName, tipeAbsen) => {
   try {
+    assertDriveConfigured();
     const rootFolderId = process.env.DRIVE_ROOT_FOLDER_ID;
+    if (!rootFolderId) {
+      throw new Error('DRIVE_ROOT_FOLDER_ID belum diatur.');
+    }
     
     // Setup Penamaan Folder
     const now = new Date();
@@ -60,7 +72,11 @@ const uploadPhotoToDrive = async (fileBuffer, mimeType, fileName, tipeAbsen) => 
     const weekNumber = Math.ceil(now.getDate() / 7);
     const weekName = `Minggu_${weekNumber}`;
     const dayName = `${days[now.getDay()]}_${now.getDate()}`;
-    const folderType = tipeAbsen === 'keluar' ? 'absen_keluar' : 'absen_masuk';
+    const folderType = tipeAbsen === 'pulang' || tipeAbsen === 'keluar'
+      ? 'absen_pulang'
+      : tipeAbsen === 'profile'
+        ? 'foto_profil'
+        : 'absen_masuk';
 
     // Eksekusi Pembuatan/Pencarian Folder
     const monthFolderId = await getOrCreateFolder(monthName, rootFolderId);
@@ -96,6 +112,10 @@ const uploadPhotoToDrive = async (fileBuffer, mimeType, fileName, tipeAbsen) => 
       requestBody: { role: 'reader', type: 'anyone' },
     });
 
+    if (tipeAbsen === 'profile') {
+      return `https://drive.google.com/thumbnail?id=${fileId}&sz=w1000`;
+    }
+
     return uploadedFile.data.webViewLink;
 
   } catch (error) {
@@ -104,6 +124,30 @@ const uploadPhotoToDrive = async (fileBuffer, mimeType, fileName, tipeAbsen) => 
   }
 };
 
+const testDriveConnection = async () => {
+  assertDriveConfigured();
+  await drive.about.get({ fields: 'user' });
+  return true;
+};
+
+const listFilesInFolder = async (folderId = process.env.DRIVE_ROOT_FOLDER_ID) => {
+  assertDriveConfigured();
+  if (!folderId) {
+    throw new Error('Folder Google Drive belum diatur.');
+  }
+
+  const response = await drive.files.list({
+    q: `'${folderId}' in parents and trashed=false`,
+    fields: 'files(id,name,mimeType,webViewLink,createdTime)',
+    orderBy: 'createdTime desc',
+    spaces: 'drive',
+  });
+
+  return response.data.files || [];
+};
+
 module.exports = {
-  uploadPhotoToDrive
+  uploadPhotoToDrive,
+  testDriveConnection,
+  listFilesInFolder,
 };

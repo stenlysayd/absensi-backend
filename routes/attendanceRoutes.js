@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 
-const { checkEligibility, submitAttendance, getHistory } = require('../controllers/attendanceController');
+const { getTodayStatus, checkEligibility, submitAttendance, getHistory } = require('../controllers/attendanceController');
 const { verifyToken } = require('../middlewares/authMiddleware');
 
 // Setup Multer (Simpan di memory sementara untuk dilempar ke Google Drive)
@@ -16,6 +16,7 @@ const upload = multer({
 
 // Endpoint 1: Cek lokasi & waktu (Payload JSON)
 router.post('/check', verifyToken, checkEligibility);
+router.get('/today-status', verifyToken, getTodayStatus);
 
 // Endpoint 2: Submit final absensi (Payload Multipart/Form-Data)
 // Field name untuk gambar di aplikasi Flutter nantinya wajib bernama 'photo'

@@ -6,12 +6,22 @@ const jwt = require('jsonwebtoken');
 // Request Register Akun Baru
 const register = async (req, res) => {
   try {
-    const { nuptk, name, email, password, role } = req.body;
+    const { nuptk, name, email, password } = req.body;
+    const cleanNuptk = (nuptk || '').toString().trim();
+    const cleanName = (name || '').toString().trim();
+    const cleanEmail = (email || '').toString().trim().toLowerCase();
+
+    if (!cleanNuptk || !cleanName || !cleanEmail || !password) {
+      return res.status(400).json({ success: false, message: 'NUPTK, nama, email, dan password wajib diisi.' });
+    }
 
     // 1. Cek apakah NUPTK sudah terdaftar
-    const userCheck = await pool.query('SELECT * FROM users WHERE nuptk = $1', [nuptk]);
+    const userCheck = await pool.query(
+      'SELECT * FROM users WHERE nuptk = $1 OR LOWER(email) = LOWER($2)',
+      [cleanNuptk, cleanEmail],
+    );
     if (userCheck.rows.length > 0) {
-      return res.status(400).json({ success: false, message: 'NUPTK sudah terdaftar di sistem.' });
+      return res.status(400).json({ success: false, message: 'NUPTK atau email sudah terdaftar di sistem.' });
     }
 
     // 2. Hash Password
@@ -23,7 +33,7 @@ const register = async (req, res) => {
       VALUES ($1, $2, $3, $4, $5)
       RETURNING id, name, nuptk, role;
     `;
-    const values = [nuptk, name, email, passwordHash, role || 'guru'];
+    const values = [cleanNuptk, cleanName, cleanEmail, passwordHash, 'guru'];
     
     const newUser = await pool.query(insertQuery, values);
 
@@ -93,7 +103,8 @@ const login = async (req, res) => {
     const payload = {
       id: user.id,
       nuptk: user.nuptk,
-      role: user.role
+      role: user.role,
+      token_version: user.token_version || 0,
     };
 
     const token = jwt.sign(payload, process.env.JWT_SECRET, {
@@ -109,9 +120,11 @@ const login = async (req, res) => {
         user: {
           id: user.id,
           name: user.name,
+          email: user.email,
           nuptk: user.nuptk,
           role: user.role,
-          device_id: user.device_id
+          device_id: user.device_id,
+          profile_photo_url: user.profile_photo_url,
         }
       }
     });
