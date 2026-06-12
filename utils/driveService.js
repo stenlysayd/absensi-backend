@@ -1,6 +1,7 @@
 // utils/driveService.js
 const { google } = require('googleapis');
 const stream = require('stream');
+const { notifyDriveHealth } = require('./emailAlertService');
 require('dotenv').config();
 
 const GOOGLE_API_TIMEOUT_MS = Number(process.env.GOOGLE_API_TIMEOUT_MS || 15000);
@@ -66,6 +67,20 @@ const normalizeDriveError = (error) => {
   normalizedError.status = error?.response?.status || error?.status || 503;
 
   return normalizedError;
+};
+
+const reportDriveFailure = async (error) => {
+  try {
+    await notifyDriveHealth({
+      ok: false,
+      connected: false,
+      code: error.code || 'DRIVE_CONNECTION_FAILED',
+      message: error.message,
+      reauth_required: Boolean(error.reauthRequired),
+    });
+  } catch (alertError) {
+    console.error('Gagal mengirim alert Google Drive:', alertError.message);
+  }
 };
 
 const requestFreshAccessToken = async () => {
@@ -141,7 +156,9 @@ const refreshDriveAccessToken = async () => {
       account_name: response.data.user?.displayName || null,
     };
   } catch (error) {
-    throw normalizeDriveError(error);
+    const normalizedError = normalizeDriveError(error);
+    await reportDriveFailure(normalizedError);
+    throw normalizedError;
   }
 };
 
@@ -241,8 +258,13 @@ const uploadPhotoToDrive = async (fileBuffer, mimeType, fileName, tipeAbsen) => 
     return uploadedFile.data.webViewLink;
 
   } catch (error) {
-    console.error('Gagal mengupload ke Google Drive (OAuth2):', error.message);
-    throw error;
+    const normalizedError = normalizeDriveError(error);
+    console.error(
+      'Gagal mengupload ke Google Drive (OAuth2):',
+      normalizedError.message,
+    );
+    await reportDriveFailure(normalizedError);
+    throw normalizedError;
   }
 };
 
@@ -251,20 +273,26 @@ const testDriveConnection = async () => {
 };
 
 const listFilesInFolder = async (folderId = process.env.DRIVE_ROOT_FOLDER_ID) => {
-  assertDriveConfigured();
-  await requestFreshAccessToken();
-  if (!folderId) {
-    throw new Error('Folder Google Drive belum diatur.');
+  try {
+    assertDriveConfigured();
+    await requestFreshAccessToken();
+    if (!folderId) {
+      throw new Error('Folder Google Drive belum diatur.');
+    }
+
+    const response = await drive.files.list({
+      q: `'${folderId}' in parents and trashed=false`,
+      fields: 'files(id,name,mimeType,webViewLink,createdTime)',
+      orderBy: 'createdTime desc',
+      spaces: 'drive',
+    });
+
+    return response.data.files || [];
+  } catch (error) {
+    const normalizedError = normalizeDriveError(error);
+    await reportDriveFailure(normalizedError);
+    throw normalizedError;
   }
-
-  const response = await drive.files.list({
-    q: `'${folderId}' in parents and trashed=false`,
-    fields: 'files(id,name,mimeType,webViewLink,createdTime)',
-    orderBy: 'createdTime desc',
-    spaces: 'drive',
-  });
-
-  return response.data.files || [];
 };
 
 module.exports = {
