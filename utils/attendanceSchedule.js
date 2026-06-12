@@ -138,6 +138,7 @@ module.exports = {
   DEFAULT_SCHEDULE,
   normalizeTime,
   normalizeWeekdays,
+  getMakassarNow,
   getAttendanceSchedule,
   buildAttendanceWindow,
   validateAttendanceWindow,

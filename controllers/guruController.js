@@ -13,12 +13,14 @@ const getDashboard = async(req, res) => {
 
         // 2. Hitung rekap absensi HANYA untuk bulan & tahun ini (Sintaks PostgreSQL)
         const statQuery = `
-      SELECT status, COUNT(*) as total
-      FROM attendance
+      SELECT daily_status AS status, COUNT(*) as total
+      FROM attendance_daily
       WHERE user_id = $1
-        AND EXTRACT(MONTH FROM created_at) = EXTRACT(MONTH FROM CURRENT_DATE)
-        AND EXTRACT(YEAR FROM created_at) = EXTRACT(YEAR FROM CURRENT_DATE)
-      GROUP BY status
+        AND EXTRACT(MONTH FROM attendance_date) =
+            EXTRACT(MONTH FROM (now() AT TIME ZONE 'Asia/Makassar')::date)
+        AND EXTRACT(YEAR FROM attendance_date) =
+            EXTRACT(YEAR FROM (now() AT TIME ZONE 'Asia/Makassar')::date)
+      GROUP BY daily_status
     `;
         const stats = await pool.query(statQuery, [userId]);
 
@@ -29,10 +31,10 @@ const getDashboard = async(req, res) => {
             alpha = 0;
         stats.rows.forEach(row => {
             const s = row.status.toLowerCase();
-            if (s === 'valid' || s === 'hadir') hadir = parseInt(row.total);
-            else if (s === 'izin') izin = parseInt(row.total);
-            else if (s === 'sakit') sakit = parseInt(row.total);
-            else if (s === 'rejected' || s === 'alpha') alpha = parseInt(row.total);
+            if (s === 'valid' || s === 'hadir' || s === 'incomplete') hadir += parseInt(row.total);
+            else if (s === 'izin') izin += parseInt(row.total);
+            else if (s === 'sakit') sakit += parseInt(row.total);
+            else if (s === 'rejected' || s === 'alpha') alpha += parseInt(row.total);
         });
 
         res.json({

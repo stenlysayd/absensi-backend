@@ -2,6 +2,8 @@ const crypto = require('crypto');
 const pool = require('../config/db');
 const { refreshDriveAccessToken } = require('../utils/driveService');
 const { notifyDriveHealth } = require('../utils/emailAlertService');
+const { finalizeAttendanceDate } = require('../utils/attendanceDailyService');
+const { getMakassarNow } = require('../utils/attendanceSchedule');
 
 const secureEqual = (left, right) => {
   const leftBuffer = Buffer.from(left || '');
@@ -112,7 +114,32 @@ const runDailyMaintenance = async (req, res) => {
   });
 };
 
+const runDailyAttendanceFinalization = async (req, res) => {
+  if (!process.env.CRON_SECRET || !isAuthorizedCronRequest(req)) {
+    return res.status(401).json({
+      success: false,
+      code: 'UNAUTHORIZED_CRON',
+      message: 'Cron request tidak terotorisasi.',
+    });
+  }
+
+  try {
+    const date = getMakassarNow().date;
+    const result = await finalizeAttendanceDate(date);
+    console.log('[attendance-finalization]', result);
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('[attendance-finalization]', error);
+    res.status(500).json({
+      success: false,
+      code: 'ATTENDANCE_FINALIZATION_FAILED',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   runDailyMaintenance,
+  runDailyAttendanceFinalization,
   toggleDatabaseKeepalive,
 };

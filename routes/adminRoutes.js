@@ -19,6 +19,15 @@ const {
   transferAdmin,
 } = require('../controllers/adminController');
 const { verifyToken, verifyAdmin } = require('../middlewares/authMiddleware');
+const {
+  getCalendarOverview,
+  createHoliday,
+  updateHoliday,
+  deleteHoliday,
+  confirmCalendarReview,
+  correctDailyAttendance,
+  finalizeDateManually,
+} = require('../controllers/calendarController');
 
 // Semua rute di bawah ini wajib pakai Token JWT dan wajib ber-role 'admin'
 router.use(verifyToken, verifyAdmin);
@@ -33,9 +42,16 @@ router.get('/export/excel', exportAttendanceExcel);
 router.get('/drive/status', getDriveStatus);
 router.get('/drive/files', getDriveFiles);
 router.get('/attendance-schedule', getAttendanceScheduleAdmin);
+router.get('/calendar', getCalendarOverview);
 
 router.put('/config', updateSchoolConfig);
 router.put('/attendance-schedule', updateAttendanceSchedule);
+router.post('/calendar', createHoliday);
+router.put('/calendar/:id', updateHoliday);
+router.delete('/calendar/:id', deleteHoliday);
+router.post('/calendar/confirm-review', confirmCalendarReview);
+router.patch('/daily-attendance/:id/correct', correctDailyAttendance);
+router.post('/daily-attendance/finalize', finalizeDateManually);
 router.post('/transfer-admin', transferAdmin);
 router.post('/reset-device', resetDeviceBinding);
 router.post('/force-reset-password', adminResetPassword);

@@ -5,10 +5,17 @@ const {
     getAttendanceSchedule,
     buildAttendanceWindow,
     validateAttendanceWindow,
+    getMakassarNow,
 } = require('../utils/attendanceSchedule');
+const {
+    absenceStatuses,
+    getDayContext,
+    syncDailyFromAttendance,
+    listCalendarDays,
+} = require('../utils/attendanceDailyService');
 
 const allowedAttendanceTypes = ['masuk', 'pulang'];
-const absenceStatuses = ['izin', 'sakit', 'alpha'];
+const allowedPresenceStatuses = ['hadir', ...absenceStatuses];
 
 // Fungsi Geofencing: Haversine Formula
 const calculateDistance = (lat1, lon1, lat2, lon2) => {
@@ -35,39 +42,34 @@ const normalizePresenceStatus = (value) => {
     return String(value || 'hadir').trim().toLowerCase();
 };
 
-const getTodayAttendanceFlowError = async(userId, tipeAbsen, jenisKehadiran) => {
-    const { rows } = await pool.query(
+const getTodayAttendanceFlowError = async(
+    userId,
+    tipeAbsen,
+    jenisKehadiran,
+    client = pool,
+    attendanceDate = getMakassarNow().date,
+) => {
+    const { rows } = await client.query(
         `
         SELECT tipe_absen, status
         FROM attendance
         WHERE user_id = $1
-          AND DATE(created_at AT TIME ZONE 'Asia/Makassar') = (now() AT TIME ZONE 'Asia/Makassar')::date
+          AND attendance_date = $2::date
           AND status <> 'rejected'
         ORDER BY created_at ASC
         `,
-        [userId]
+        [userId, attendanceDate]
     );
 
     const hasAnyRecord = rows.length > 0;
-    const hasValidMasuk = rows.some(
-        (row) => row.tipe_absen === 'masuk' && ['valid', 'hadir'].includes(String(row.status).toLowerCase())
-    );
-    const hasPulang = rows.some((row) => row.tipe_absen === 'pulang');
+    const hasSelectedType = rows.some((row) => row.tipe_absen === tipeAbsen);
 
     if (absenceStatuses.includes(jenisKehadiran)) {
         return hasAnyRecord ? 'Absensi hari ini sudah tercatat. Admin bisa koreksi data jika ada perubahan.' : null;
     }
 
-    if (tipeAbsen === 'masuk' && hasAnyRecord) {
-        return 'Absen masuk hari ini sudah tercatat. Gunakan absen pulang jika ingin menutup hari kerja.';
-    }
-
-    if (tipeAbsen === 'pulang' && !hasValidMasuk) {
-        return 'Absen masuk dulu sebelum absen pulang.';
-    }
-
-    if (tipeAbsen === 'pulang' && hasPulang) {
-        return 'Absen pulang hari ini sudah tercatat.';
+    if (hasSelectedType) {
+        return `Absen ${tipeAbsen} hari ini sudah tercatat.`;
     }
 
     return null;
@@ -79,7 +81,7 @@ const getTodayRecords = async(userId) => {
         SELECT tipe_absen, status, created_at
         FROM attendance
         WHERE user_id = $1
-          AND DATE(created_at AT TIME ZONE 'Asia/Makassar') = (now() AT TIME ZONE 'Asia/Makassar')::date
+          AND attendance_date = (now() AT TIME ZONE 'Asia/Makassar')::date
           AND status <> 'rejected'
         ORDER BY created_at ASC
         `,
@@ -98,6 +100,18 @@ const buildTodayStatus = async(userId) => {
     const hasAbsence = records.some((row) => absenceStatuses.includes(String(row.status).toLowerCase()));
     const masukWindow = buildAttendanceWindow(schedule, 'masuk');
     const pulangWindow = buildAttendanceWindow(schedule, 'pulang');
+    const dayContext = await getDayContext(masukWindow.now.date);
+    const dailyResult = await pool.query(
+        `
+          SELECT masuk_status, pulang_status, daily_status, reason, finalized_at
+          FROM attendance_daily
+          WHERE user_id = $1 AND attendance_date = $2::date
+          LIMIT 1
+        `,
+        [userId, masukWindow.now.date],
+    );
+    const daily = dailyResult.rows[0] || null;
+    const attendanceOpen = dayContext.is_working_day && !dayContext.is_holiday;
 
     return {
         date: masukWindow.now.date,
@@ -107,8 +121,14 @@ const buildTodayStatus = async(userId) => {
         has_masuk: hasMasuk,
         has_pulang: hasPulang,
         has_absence: hasAbsence,
-        can_absen_masuk: masukWindow.open && !hasMasuk && !hasAbsence && records.length === 0,
-        can_absen_pulang: pulangWindow.open && hasMasuk && !hasPulang,
+        masuk_status: daily?.masuk_status || (hasMasuk ? 'recorded' : 'pending'),
+        pulang_status: daily?.pulang_status || (hasPulang ? 'recorded' : 'pending'),
+        daily_status: daily?.daily_status || 'pending',
+        reason: daily?.reason || null,
+        is_holiday: dayContext.is_holiday || !dayContext.is_working_day,
+        holiday: dayContext.holiday,
+        can_absen_masuk: attendanceOpen && masukWindow.open && !hasMasuk && !hasAbsence,
+        can_absen_pulang: attendanceOpen && pulangWindow.open && !hasPulang && !hasAbsence,
         masuk_window: masukWindow,
         pulang_window: pulangWindow,
     };
@@ -143,8 +163,25 @@ const checkEligibility = async(req, res) => {
         if (!normalizedType) {
             return res.status(400).json({ success: false, message: 'Jenis absen hanya boleh masuk atau pulang.' });
         }
+        if (!allowedPresenceStatuses.includes(normalizedStatus)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Status kehadiran hanya boleh Hadir, Izin, atau Sakit.',
+            });
+        }
 
         const schedule = await getAttendanceSchedule(pool);
+        const dayContext = await getDayContext(getMakassarNow().date);
+        if (!dayContext.is_working_day || dayContext.is_holiday) {
+            return res.status(403).json({
+                success: false,
+                code: 'HOLIDAY',
+                message: dayContext.holiday?.name
+                    ? `Absensi ditutup: ${dayContext.holiday.name}.`
+                    : 'Hari ini bukan hari kerja.',
+                data: dayContext,
+            });
+        }
         const scheduleGate = validateAttendanceWindow(schedule, normalizedType);
         if (!scheduleGate.ok) {
             return res.status(403).json({ success: false, message: scheduleGate.message, data: scheduleGate.window });
@@ -157,9 +194,9 @@ const checkEligibility = async(req, res) => {
             return res.status(400).json({ success: false, message: 'Akurasi GPS lemah (>50m). Pastikan berada di area terbuka.' });
         }
 
-        // Validasi Wajib Alasan untuk Izin/Sakit/Alpha
+        // Validasi wajib alasan hanya untuk Izin/Sakit.
         if (absenceStatuses.includes(normalizedStatus) && (!alasan || alasan.trim() === '')) {
-            return res.status(400).json({ success: false, message: 'Kolom alasan wajib diisi untuk status selain Hadir.' });
+            return res.status(400).json({ success: false, message: 'Kolom keterangan wajib diisi untuk Izin atau Sakit.' });
         }
 
         const flowError = await getTodayAttendanceFlowError(req.user.id, normalizedType, normalizedStatus);
@@ -202,6 +239,7 @@ const checkEligibility = async(req, res) => {
 
 // ENDPOINT 2: Submit Absensi Final (Upload Foto + Insert Supabase)
 const submitAttendance = async(req, res) => {
+    const client = await pool.connect();
     try {
         const user = req.user; // Dari token JWT
         // Tambahkan jenis_kehadiran dan alasan
@@ -218,21 +256,33 @@ const submitAttendance = async(req, res) => {
         if (!normalizedType) {
             return res.status(400).json({ success: false, message: 'Jenis absen hanya boleh masuk atau pulang.' });
         }
+        if (!allowedPresenceStatuses.includes(normalizedStatus)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Status kehadiran hanya boleh Hadir, Izin, atau Sakit.',
+            });
+        }
 
         const schedule = await getAttendanceSchedule(pool);
+        const attendanceDate = getMakassarNow().date;
+        const dayContext = await getDayContext(attendanceDate);
+        if (!dayContext.is_working_day || dayContext.is_holiday) {
+            return res.status(403).json({
+                success: false,
+                code: 'HOLIDAY',
+                message: dayContext.holiday?.name
+                    ? `Absensi ditutup: ${dayContext.holiday.name}.`
+                    : 'Hari ini bukan hari kerja.',
+            });
+        }
         const scheduleGate = validateAttendanceWindow(schedule, normalizedType);
         if (!scheduleGate.ok) {
             return res.status(403).json({ success: false, message: scheduleGate.message, data: scheduleGate.window });
         }
 
-        // Validasi Ulang Alasan Izin/Sakit/Alpha di tahap akhir
+        // Validasi ulang alasan Izin/Sakit di tahap akhir.
         if (absenceStatuses.includes(normalizedStatus) && (!alasan || alasan.trim() === '')) {
-            return res.status(400).json({ success: false, message: 'Alasan tidak boleh kosong untuk status selain Hadir.' });
-        }
-
-        const flowError = await getTodayAttendanceFlowError(user.id, normalizedType, normalizedStatus);
-        if (flowError) {
-            return res.status(409).json({ success: false, message: flowError });
+            return res.status(400).json({ success: false, message: 'Keterangan wajib diisi untuk Izin atau Sakit.' });
         }
 
         // 2. Upload Foto ke Google Drive (Nama file disesuaikan dengan jenis kehadiran)
@@ -258,8 +308,19 @@ const submitAttendance = async(req, res) => {
 
         // 4. Simpan Data ke Database Supabase
         const insertQuery = `
-      INSERT INTO attendance (user_id, latitude, longitude, accuracy, is_mocked, photo_url, status, reason, tipe_absen)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      INSERT INTO attendance (
+        user_id,
+        latitude,
+        longitude,
+        accuracy,
+        is_mocked,
+        photo_url,
+        status,
+        reason,
+        tipe_absen,
+        attendance_date
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date)
       RETURNING *;
     `;
         const values = [
@@ -274,7 +335,46 @@ const submitAttendance = async(req, res) => {
             normalizedType
         ];
 
-        const result = await pool.query(insertQuery, values);
+        await client.query('BEGIN');
+        await client.query(
+            'SELECT pg_advisory_xact_lock(hashtext($1))',
+            [`${user.id}:${attendanceDate}`],
+        );
+        const flowError = await getTodayAttendanceFlowError(
+            user.id,
+            normalizedType,
+            normalizedStatus,
+            client,
+            attendanceDate,
+        );
+        if (flowError) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ success: false, message: flowError });
+        }
+
+        const result = await client.query(insertQuery, [
+            ...values,
+            attendanceDate,
+        ]);
+        if (statusAbsen !== 'rejected') {
+            await syncDailyFromAttendance({
+                client,
+                userId: user.id,
+                attendanceDate,
+                attendance: result.rows[0],
+                presenceStatus: normalizedStatus,
+                type: normalizedType,
+                reason: finalReason,
+            });
+        }
+        await client.query('COMMIT');
+
+        if (statusAbsen === 'rejected') {
+            return res.status(403).json({
+                success: false,
+                message: finalReason,
+            });
+        }
 
         res.json({
             success: true,
@@ -283,8 +383,11 @@ const submitAttendance = async(req, res) => {
         });
 
     } catch (error) {
+        await client.query('ROLLBACK').catch(() => {});
         console.error('Error submit absensi:', error);
         res.status(500).json({ success: false, message: 'Gagal merekam absensi server error.' });
+    } finally {
+        client.release();
     }
 };
 
@@ -293,10 +396,22 @@ const getHistory = async(req, res) => {
     try {
         const userId = req.user.id;
         const query = `
-      SELECT created_at, status, reason, tipe_absen
-      FROM attendance 
-      WHERE user_id = $1 
-      ORDER BY created_at DESC 
+      SELECT
+        d.id,
+        d.attendance_date,
+        d.masuk_at,
+        d.pulang_at,
+        d.masuk_status,
+        d.pulang_status,
+        d.daily_status,
+        d.reason,
+        d.is_holiday,
+        h.name AS holiday_name,
+        d.correction_reason
+      FROM attendance_daily d
+      LEFT JOIN holiday_calendar h ON h.id = d.holiday_id
+      WHERE d.user_id = $1
+      ORDER BY d.attendance_date DESC
       LIMIT 50
     `;
         const result = await pool.query(query, [userId]);
@@ -312,8 +427,35 @@ const getHistory = async(req, res) => {
     }
 };
 
+const getReminderCalendar = async (req, res) => {
+    try {
+        const requestedDays = Number(req.query.days || 60);
+        const days = Math.min(90, Math.max(7, requestedDays));
+        const from = getMakassarNow().date;
+        const toDate = new Date(`${from}T00:00:00+08:00`);
+        toDate.setDate(toDate.getDate() + days);
+        const to = toDate.toLocaleDateString('en-CA', {
+            timeZone: 'Asia/Makassar',
+        });
+        const schedule = await getAttendanceSchedule(pool);
+        const calendar = await listCalendarDays({ from, to });
+
+        res.json({
+            success: true,
+            data: { from, to, schedule, days: calendar },
+        });
+    } catch (error) {
+        console.error('Error reminder calendar:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Gagal memuat kalender pengingat.',
+        });
+    }
+};
+
 module.exports = {
     getTodayStatus,
+    getReminderCalendar,
     checkEligibility,
     submitAttendance,
     getHistory

@@ -9,6 +9,7 @@ const {
   normalizeWeekdays,
   getAttendanceSchedule,
 } = require('../utils/attendanceSchedule');
+const { getDayContext } = require('../utils/attendanceDailyService');
 
 const formatDateWita = (value) =>
   new Date(value).toLocaleDateString('id-ID', {
@@ -78,28 +79,38 @@ const getUsers = async (req, res) => {
 const getDashboardStats = async (req, res) => {
   try {
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Makassar' }); // Format YYYY-MM-DD
+    const dayContext = await getDayContext(today);
 
     const totalUsersQuery = await pool.query("SELECT COUNT(*) FROM users WHERE role = 'guru'");
     const totalTeachers = parseInt(totalUsersQuery.rows[0].count);
 
     const todayAttendanceQuery = await pool.query(`
-      SELECT COUNT(DISTINCT user_id) FROM attendance
-      WHERE DATE(created_at AT TIME ZONE 'Asia/Makassar') = $1 AND status = 'valid'
+      SELECT COUNT(*) FROM attendance_daily
+      WHERE attendance_date = $1
+        AND (
+          daily_status IN ('hadir', 'incomplete')
+          OR masuk_status = 'recorded'
+          OR pulang_status = 'recorded'
+        )
     `, [today]);
     const totalPresent = parseInt(todayAttendanceQuery.rows[0].count);
 
     const izinQuery = await pool.query(
       `
-      SELECT COUNT(DISTINCT user_id) FROM attendance
-      WHERE DATE(created_at AT TIME ZONE 'Asia/Makassar') = $1
-        AND LOWER(status) IN ('izin', 'sakit', 'cuti')
+      SELECT COUNT(*) FROM attendance_daily
+      WHERE attendance_date = $1
+        AND daily_status IN ('izin', 'sakit')
     `,
       [today],
     );
     const totalIzin = parseInt(izinQuery.rows[0].count);
 
-    const totalTanpaKabar = Math.max(0, totalTeachers - totalPresent - totalIzin);
-    const totalAbsent = totalTeachers - totalPresent;
+    const totalTanpaKabar = dayContext.is_working_day && !dayContext.is_holiday
+      ? Math.max(0, totalTeachers - totalPresent - totalIzin)
+      : 0;
+    const totalAbsent = dayContext.is_working_day && !dayContext.is_holiday
+      ? Math.max(0, totalTeachers - totalPresent)
+      : 0;
 
     res.json({
       success: true,
@@ -110,6 +121,8 @@ const getDashboardStats = async (req, res) => {
         total_absent: totalAbsent,
         total_izin: totalIzin,
         total_tanpa_kabar: totalTanpaKabar,
+        is_holiday: dayContext.is_holiday || !dayContext.is_working_day,
+        holiday_name: dayContext.holiday?.name || null,
       },
     });
   } catch (err) {
@@ -127,14 +140,26 @@ const getDailyAttendance = async (req, res) => {
     const date = req.query.date || new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Makassar' });
 
     const query = `
-      SELECT a.id, u.name, u.nuptk, a.created_at AS check_in_time, a.tipe_absen, a.status, a.photo_url, a.latitude, a.longitude
-      FROM attendance a JOIN users u ON a.user_id = u.id
-      WHERE DATE(a.created_at AT TIME ZONE 'Asia/Makassar') = $1
-      ORDER BY a.created_at DESC LIMIT $2 OFFSET $3
+      SELECT d.id,
+             u.name,
+             u.nuptk,
+             d.attendance_date,
+             d.masuk_at,
+             d.pulang_at,
+             d.masuk_status,
+             d.pulang_status,
+             d.daily_status,
+             d.reason,
+             d.is_holiday,
+             d.correction_reason
+      FROM attendance_daily d
+      JOIN users u ON d.user_id = u.id
+      WHERE d.attendance_date = $1
+      ORDER BY u.name ASC LIMIT $2 OFFSET $3
     `;
     const { rows } = await pool.query(query, [date, limit, offset]);
 
-    const countQuery = `SELECT COUNT(*) FROM attendance WHERE DATE(created_at AT TIME ZONE 'Asia/Makassar') = $1`;
+    const countQuery = `SELECT COUNT(*) FROM attendance_daily WHERE attendance_date = $1`;
     const totalQuery = await pool.query(countQuery, [date]);
     const totalItems = parseInt(totalQuery.rows[0].count);
 
@@ -155,21 +180,30 @@ const exportAttendanceExcel = async (req, res) => {
     const date = req.query.date || new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Makassar' });
 
     const query = `
-      SELECT a.id,
+      SELECT d.id,
              u.name,
              u.nuptk,
-             a.created_at AS check_in_time,
-             a.tipe_absen,
-             a.status,
-             a.photo_url,
-             a.latitude,
-             a.longitude,
-             a.accuracy,
-             a.is_mocked,
-             a.reason
-      FROM attendance a JOIN users u ON a.user_id = u.id
-      WHERE DATE(a.created_at AT TIME ZONE 'Asia/Makassar') = $1
-      ORDER BY a.created_at ASC
+             d.attendance_date,
+             d.masuk_at,
+             d.pulang_at,
+             d.masuk_status,
+             d.pulang_status,
+             d.daily_status,
+             d.reason,
+             d.is_holiday,
+             d.correction_reason,
+             am.photo_url AS masuk_photo_url,
+             ap.photo_url AS pulang_photo_url,
+             am.latitude AS masuk_latitude,
+             am.longitude AS masuk_longitude,
+             ap.latitude AS pulang_latitude,
+             ap.longitude AS pulang_longitude
+      FROM attendance_daily d
+      JOIN users u ON d.user_id = u.id
+      LEFT JOIN attendance am ON am.id = d.masuk_attendance_id
+      LEFT JOIN attendance ap ON ap.id = d.pulang_attendance_id
+      WHERE d.attendance_date = $1
+      ORDER BY u.name ASC
     `;
     const { rows } = await pool.query(query, [date]);
 
@@ -182,17 +216,18 @@ const exportAttendanceExcel = async (req, res) => {
       { header: 'Nama Guru', key: 'name', width: 25 },
       { header: 'NUPTK', key: 'nuptk', width: 20 },
       { header: 'Tanggal', key: 'date', width: 14 },
-      { header: 'Hari', key: 'day', width: 14 },
-      { header: 'Jam Absen', key: 'time', width: 12 },
-      { header: 'Tipe Absen', key: 'tipe', width: 14 },
-      { header: 'Status', key: 'status', width: 15 },
-      { header: 'Latitude', key: 'latitude', width: 16 },
-      { header: 'Longitude', key: 'longitude', width: 16 },
-      { header: 'Akurasi (m)', key: 'accuracy', width: 14 },
-      { header: 'Mock GPS', key: 'mocked', width: 12 },
-      { header: 'Link Maps', key: 'maps', width: 18 },
-      { header: 'Link Foto', key: 'photo', width: 18 },
+      { header: 'Status Harian', key: 'daily_status', width: 18 },
+      { header: 'Status Masuk', key: 'masuk_status', width: 20 },
+      { header: 'Jam Masuk', key: 'masuk_time', width: 14 },
+      { header: 'Foto Masuk', key: 'masuk_photo', width: 18 },
+      { header: 'Lokasi Masuk', key: 'masuk_maps', width: 18 },
+      { header: 'Status Pulang', key: 'pulang_status', width: 20 },
+      { header: 'Jam Pulang', key: 'pulang_time', width: 14 },
+      { header: 'Foto Pulang', key: 'pulang_photo', width: 18 },
+      { header: 'Lokasi Pulang', key: 'pulang_maps', width: 18 },
       { header: 'Keterangan', key: 'reason', width: 36 },
+      { header: 'Hari Libur', key: 'holiday', width: 14 },
+      { header: 'Koreksi Admin', key: 'correction', width: 36 },
     ];
 
     worksheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
@@ -205,24 +240,38 @@ const exportAttendanceExcel = async (req, res) => {
     worksheet.views = [{ state: 'frozen', ySplit: 1 }];
 
     rows.forEach((row, index) => {
-      const linkMaps = mapsUrl(row.latitude, row.longitude);
+      const masukMaps = mapsUrl(row.masuk_latitude, row.masuk_longitude);
+      const pulangMaps = mapsUrl(row.pulang_latitude, row.pulang_longitude);
       worksheet.addRow({
         no: index + 1,
         id: row.id,
         name: row.name,
         nuptk: row.nuptk,
-        date: formatDateWita(row.check_in_time),
-        day: formatDayWita(row.check_in_time),
-        time: formatTimeWita(row.check_in_time),
-        tipe: String(row.tipe_absen || 'masuk').toUpperCase(),
-        status: reportStatusLabel(row.status),
-        latitude: row.latitude ?? '-',
-        longitude: row.longitude ?? '-',
-        accuracy: row.accuracy ?? '-',
-        mocked: row.is_mocked ? 'Ya' : 'Tidak',
-        maps: linkMaps === '-' ? '-' : { text: 'Buka Maps', hyperlink: linkMaps },
-        photo: row.photo_url ? { text: 'Buka Foto', hyperlink: row.photo_url } : '-',
+        date: row.attendance_date,
+        daily_status: reportStatusLabel(row.daily_status),
+        masuk_status: row.masuk_status === 'missed'
+          ? 'Tidak melakukan absensi'
+          : reportStatusLabel(row.masuk_status),
+        masuk_time: row.masuk_at ? formatTimeWita(row.masuk_at) : '-',
+        masuk_photo: row.masuk_photo_url
+          ? { text: 'Buka Foto', hyperlink: row.masuk_photo_url }
+          : '-',
+        masuk_maps: masukMaps === '-'
+          ? '-'
+          : { text: 'Buka Maps', hyperlink: masukMaps },
+        pulang_status: row.pulang_status === 'missed'
+          ? 'Tidak melakukan absensi'
+          : reportStatusLabel(row.pulang_status),
+        pulang_time: row.pulang_at ? formatTimeWita(row.pulang_at) : '-',
+        pulang_photo: row.pulang_photo_url
+          ? { text: 'Buka Foto', hyperlink: row.pulang_photo_url }
+          : '-',
+        pulang_maps: pulangMaps === '-'
+          ? '-'
+          : { text: 'Buka Maps', hyperlink: pulangMaps },
         reason: row.reason || '-',
+        holiday: row.is_holiday ? 'Ya' : 'Tidak',
+        correction: row.correction_reason || '-',
       });
     });
 
@@ -354,10 +403,10 @@ const getWeeklyStats = async (req, res) => {
     const { rows } = await pool.query(`
       SELECT to_char((g.day)::date, 'YYYY-MM-DD') AS date,
              (
-               SELECT COUNT(DISTINCT a.user_id)::int
-               FROM attendance a
-               WHERE DATE(a.created_at AT TIME ZONE 'Asia/Makassar') = (g.day)::date
-                 AND a.status = 'valid'
+               SELECT COUNT(*)::int
+               FROM attendance_daily d
+               WHERE d.attendance_date = (g.day)::date
+                 AND d.daily_status IN ('hadir', 'incomplete')
              ) AS count
       FROM generate_series(
         ((now() AT TIME ZONE 'Asia/Makassar')::date - 6),
@@ -390,23 +439,39 @@ const getAttendanceReportRange = async (req, res) => {
 
     const query = `
       SELECT u.id::text AS profile_id,
-             a.id::text AS attendance_id,
+             d.id::text AS daily_id,
              u.name AS teacher_name,
+             u.email,
              u.nuptk,
-             to_char(DATE(a.created_at AT TIME ZONE 'Asia/Makassar'), 'YYYY-MM-DD') AS attended_on,
-             a.created_at AS check_in_at,
-             COALESCE(a.tipe_absen, 'masuk') AS tipe_absen,
-             a.status,
-             trim(both from coalesce(a.latitude::text, '')) AS latitude,
-             trim(both from coalesce(a.longitude::text, '')) AS longitude,
-             trim(both from coalesce(a.accuracy::text, '')) AS accuracy,
-             COALESCE(a.is_mocked, false) AS is_mocked,
-             COALESCE(a.photo_url, '') AS photo_url,
-             COALESCE(a.reason, '') AS notes
-      FROM attendance a
-      JOIN users u ON u.id = a.user_id
-      WHERE DATE(a.created_at AT TIME ZONE 'Asia/Makassar') BETWEEN $1::date AND $2::date
-      ORDER BY a.created_at ASC
+             to_char(d.attendance_date, 'YYYY-MM-DD') AS attended_on,
+             d.daily_status AS status,
+             d.masuk_status,
+             d.pulang_status,
+             d.masuk_at,
+             d.pulang_at,
+             COALESCE(d.reason, '') AS notes,
+             d.is_holiday,
+             COALESCE(h.name, '') AS holiday_name,
+             COALESCE(d.correction_reason, '') AS correction_reason,
+             d.masuk_attendance_id::text,
+             d.pulang_attendance_id::text,
+             COALESCE(am.photo_url, '') AS masuk_photo_url,
+             COALESCE(ap.photo_url, '') AS pulang_photo_url,
+             am.latitude AS masuk_latitude,
+             am.longitude AS masuk_longitude,
+             am.accuracy AS masuk_accuracy,
+             am.is_mocked AS masuk_is_mocked,
+             ap.latitude AS pulang_latitude,
+             ap.longitude AS pulang_longitude,
+             ap.accuracy AS pulang_accuracy,
+             ap.is_mocked AS pulang_is_mocked
+      FROM attendance_daily d
+      JOIN users u ON u.id = d.user_id
+      LEFT JOIN holiday_calendar h ON h.id = d.holiday_id
+      LEFT JOIN attendance am ON am.id = d.masuk_attendance_id
+      LEFT JOIN attendance ap ON ap.id = d.pulang_attendance_id
+      WHERE d.attendance_date BETWEEN $1::date AND $2::date
+      ORDER BY d.attendance_date ASC, u.name ASC
     `;
     const { rows } = await pool.query(query, [from, to]);
     res.json({ success: true, data: rows });
