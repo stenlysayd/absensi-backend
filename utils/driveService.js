@@ -3,6 +3,13 @@ const { google } = require('googleapis');
 const stream = require('stream');
 require('dotenv').config();
 
+const GOOGLE_API_TIMEOUT_MS = Number(process.env.GOOGLE_API_TIMEOUT_MS || 15000);
+
+google.options({
+  timeout: GOOGLE_API_TIMEOUT_MS,
+  retry: false,
+});
+
 // Konfigurasi OAuth 2.0 Client
 const oauth2Client = new google.auth.OAuth2(
   process.env.DRIVE_CLIENT_ID,
@@ -21,6 +28,120 @@ const assertDriveConfigured = () => {
       !process.env.DRIVE_CLIENT_SECRET ||
       !process.env.DRIVE_REFRESH_TOKEN) {
     throw new Error('Konfigurasi Google Drive belum lengkap di environment server.');
+  }
+};
+
+const normalizeDriveError = (error) => {
+  if (
+    error?.code === 'DRIVE_REAUTH_REQUIRED' ||
+    error?.code === 'DRIVE_CONNECTION_FAILED'
+  ) {
+    return error;
+  }
+
+  const responseData = error?.response?.data;
+  const providerCode = responseData?.error || error?.code;
+  const providerDescription =
+    responseData?.error_description ||
+    responseData?.error?.message ||
+    error?.message ||
+    'Google Drive tidak dapat dihubungi.';
+  const searchableError = `${providerCode || ''} ${providerDescription}`.toLowerCase();
+  const reauthRequired =
+    searchableError.includes('invalid_grant') ||
+    searchableError.includes('invalid_client') ||
+    searchableError.includes('unauthorized_client');
+
+  const normalizedError = new Error(
+    reauthRequired
+      ? 'Refresh token Google Drive tidak valid atau telah kedaluwarsa. Lakukan OAuth ulang dan pastikan OAuth consent screen berstatus Production.'
+      : providerDescription,
+  );
+
+  normalizedError.code = reauthRequired
+    ? 'DRIVE_REAUTH_REQUIRED'
+    : 'DRIVE_CONNECTION_FAILED';
+  normalizedError.reauthRequired = reauthRequired;
+  normalizedError.providerCode = providerCode || null;
+  normalizedError.status = error?.response?.status || error?.status || 503;
+
+  return normalizedError;
+};
+
+const requestFreshAccessToken = async () => {
+  assertDriveConfigured();
+
+  try {
+    const requestBody = new URLSearchParams({
+      client_id: process.env.DRIVE_CLIENT_ID,
+      client_secret: process.env.DRIVE_CLIENT_SECRET,
+      refresh_token: process.env.DRIVE_REFRESH_TOKEN,
+      grant_type: 'refresh_token',
+    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), GOOGLE_API_TIMEOUT_MS);
+    let response;
+
+    try {
+      response = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body: requestBody,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    const responseData = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const providerError = new Error(
+        responseData.error_description || responseData.error || 'Gagal memperbarui access token Google.',
+      );
+      providerError.response = {
+        status: response.status,
+        data: responseData,
+      };
+      throw providerError;
+    }
+
+    if (!responseData.access_token) {
+      throw new Error('Google tidak mengembalikan access token.');
+    }
+
+    const expiresAt = Date.now() + Number(responseData.expires_in || 3600) * 1000;
+    oauth2Client.setCredentials({
+      refresh_token: process.env.DRIVE_REFRESH_TOKEN,
+      access_token: responseData.access_token,
+      token_type: responseData.token_type || 'Bearer',
+      expiry_date: expiresAt,
+    });
+
+    return {
+      expires_at: expiresAt,
+    };
+  } catch (error) {
+    throw normalizeDriveError(error);
+  }
+};
+
+const refreshDriveAccessToken = async () => {
+  try {
+    const tokenStatus = await requestFreshAccessToken();
+    const response = await drive.about.get({
+      fields: 'user(displayName)',
+    });
+
+    return {
+      connected: true,
+      access_token_refreshed: true,
+      expires_at: tokenStatus.expires_at,
+      account_name: response.data.user?.displayName || null,
+    };
+  } catch (error) {
+    throw normalizeDriveError(error);
   }
 };
 
@@ -58,6 +179,7 @@ const getOrCreateFolder = async (folderName, parentFolderId) => {
 const uploadPhotoToDrive = async (fileBuffer, mimeType, fileName, tipeAbsen) => {
   try {
     assertDriveConfigured();
+    await requestFreshAccessToken();
     const rootFolderId = process.env.DRIVE_ROOT_FOLDER_ID;
     if (!rootFolderId) {
       throw new Error('DRIVE_ROOT_FOLDER_ID belum diatur.');
@@ -125,13 +247,12 @@ const uploadPhotoToDrive = async (fileBuffer, mimeType, fileName, tipeAbsen) => 
 };
 
 const testDriveConnection = async () => {
-  assertDriveConfigured();
-  await drive.about.get({ fields: 'user' });
-  return true;
+  return refreshDriveAccessToken();
 };
 
 const listFilesInFolder = async (folderId = process.env.DRIVE_ROOT_FOLDER_ID) => {
   assertDriveConfigured();
+  await requestFreshAccessToken();
   if (!folderId) {
     throw new Error('Folder Google Drive belum diatur.');
   }
@@ -149,5 +270,6 @@ const listFilesInFolder = async (folderId = process.env.DRIVE_ROOT_FOLDER_ID) =>
 module.exports = {
   uploadPhotoToDrive,
   testDriveConnection,
+  refreshDriveAccessToken,
   listFilesInFolder,
 };

@@ -8,6 +8,7 @@ const adminRoutes = require('./routes/adminRoutes');
 const attendanceRoutes = require('./routes/attendanceRoutes');
 const guruRoutes = require('./routes/guruRoutes');
 const profileRoutes = require('./routes/profileRoutes');
+const maintenanceRoutes = require('./routes/maintenanceRoutes');
 
 const app = express();
 const port = process.env.PORT || 3300;
@@ -21,6 +22,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/profile', profileRoutes);
+app.use('/api/cron', maintenanceRoutes);
 app.use('/api', guruRoutes);
 
 app.get('/', (req, res) => {

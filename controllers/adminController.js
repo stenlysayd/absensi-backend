@@ -612,13 +612,17 @@ const transferAdmin = async (req, res) => {
 // 10. Status koneksi Google Drive dari kredensial server.
 const getDriveStatus = async (req, res) => {
   try {
-    await testDriveConnection();
-    res.json({ success: true, data: { connected: true } });
+    const driveStatus = await testDriveConnection();
+    res.json({ success: true, data: driveStatus });
   } catch (err) {
     res.status(503).json({
       success: false,
+      code: err.code || 'DRIVE_CONNECTION_FAILED',
       message: err.message || 'Google Drive belum terhubung.',
-      data: { connected: false },
+      data: {
+        connected: false,
+        reauth_required: Boolean(err.reauthRequired),
+      },
     });
   }
 };

@@ -7,10 +7,13 @@ const pool = new Pool({
   host: process.env.DB_HOST,
   database: process.env.DB_NAME,
   password: process.env.DB_PASSWORD,
-  port: process.env.DB_PORT,
+  port: Number(process.env.DB_PORT),
   ssl: {
-    rejectUnauthorized: false // Tambahkan baris ini jika Supabase menolak koneksi
-  }
+    rejectUnauthorized: false,
+  },
+  connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS || 10000),
+  idleTimeoutMillis: Number(process.env.DB_IDLE_TIMEOUT_MS || 30000),
+  max: Number(process.env.DB_POOL_MAX || 5),
 });
 
 pool.on('connect', () => {
