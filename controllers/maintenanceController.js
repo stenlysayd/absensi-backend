@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const pool = require('../config/db');
 const { refreshDriveAccessToken } = require('../utils/driveService');
+const { notifyDriveHealth } = require('../utils/emailAlertService');
 
 const secureEqual = (left, right) => {
   const leftBuffer = Buffer.from(left || '');
@@ -80,6 +81,15 @@ const runDailyMaintenance = async (req, res) => {
     driveResult.status === 'fulfilled'
       ? { ok: true, ...driveResult.value }
       : serializeFailure(driveResult.reason, 'DRIVE_CONNECTION_FAILED');
+  let emailAlert;
+
+  try {
+    emailAlert = await notifyDriveHealth(drive);
+  } catch (error) {
+    console.error('[daily-maintenance] gagal memproses email alert:', error);
+    emailAlert = serializeFailure(error, 'EMAIL_ALERT_FAILED');
+  }
+
   const success = database.ok && drive.ok;
 
   console.log('[daily-maintenance]', {
@@ -87,6 +97,8 @@ const runDailyMaintenance = async (req, res) => {
     database_value: database.value,
     drive_connected: Boolean(drive.connected),
     drive_code: drive.code || null,
+    email_alert_sent: Boolean(emailAlert.sent),
+    email_alert_code: emailAlert.code || emailAlert.reason || null,
     duration_ms: Date.now() - startedAt.getTime(),
   });
 
@@ -96,6 +108,7 @@ const runDailyMaintenance = async (req, res) => {
     duration_ms: Date.now() - startedAt.getTime(),
     database,
     drive,
+    email_alert: emailAlert,
   });
 };
 
